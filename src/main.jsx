@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { createCustomer, createReading, firebaseConfigured, logOut, readCollection, recordPayment, signIn, watchAuth } from './firebase'
+import { addCustomerBalance, createCustomer, createReading, deleteCustomer, deleteReading, firebaseConfigured, logOut, readCollection, recordPayment, signIn, updateCustomer, updateReading, watchAuth } from './firebase'
 import './styles.css'
 
 const seedCustomers = [
@@ -35,6 +35,8 @@ function App() {
   const [showCustomerForm, setShowCustomerForm] = useState(false)
   const [showPaymentForm, setShowPaymentForm] = useState(false)
   const [paymentCustomerId, setPaymentCustomerId] = useState('')
+  const [editingCustomer, setEditingCustomer] = useState(null)
+  const [editingReading, setEditingReading] = useState(null)
 
   useEffect(() => localStorage.setItem('water-customers', JSON.stringify(customers)), [customers])
   useEffect(() => localStorage.setItem('water-readings', JSON.stringify(readings)), [readings])
@@ -83,15 +85,76 @@ function App() {
       return
     }
     const reading = { customerId, date: data.get('date'), previous, present, rate }
-    const save = firebaseConfigured ? createReading(reading) : Promise.resolve({ id: Date.now(), ...reading })
+    const amount = (present - previous) * rate
+    const save = firebaseConfigured
+      ? createReading(reading).then((savedReading) => addCustomerBalance(customerId, amount).then(() => savedReading))
+      : Promise.resolve({ id: Date.now(), ...reading })
     save.then((savedReading) => {
       setReadings((current) => [...current, savedReading])
+      setCustomers((current) => current.map((customer) =>
+        customer.id === customerId ? { ...customer, balance: Number(customer.balance || 0) + amount } : customer))
       setShowReadingForm(false)
       setNotice(firebaseConfigured ? 'Meter reading saved to Firebase and bill calculated.' : 'Meter reading saved in demo mode. Connect Firebase to persist it.')
       event.currentTarget.reset()
     }).catch((error) => {
       console.error(error)
       setNotice('The meter reading could not be saved. Please try again.')
+    })
+  }
+
+  const updateExistingReading = (event) => {
+    event.preventDefault()
+    const data = new FormData(event.currentTarget)
+    const reading = {
+      customerId: data.get('customerId'),
+      date: data.get('date'),
+      previous: Number(data.get('previous')),
+      present: Number(data.get('present')),
+      rate: Number(data.get('rate')),
+    }
+    if (reading.present < reading.previous) {
+      setNotice('Present reading cannot be lower than the previous reading.')
+      return
+    }
+    const save = firebaseConfigured
+      ? updateReading(editingReading.id, reading)
+      : Promise.resolve({ id: editingReading.id, ...reading })
+    save.then((savedReading) => {
+      setReadings((current) => current.map((item) => item.id === savedReading.id ? savedReading : item))
+      setShowReadingForm(false)
+      setEditingReading(null)
+      setNotice(firebaseConfigured ? 'Meter reading updated in Firebase.' : 'Meter reading updated in demo mode.')
+    }).catch((error) => {
+      console.error(error)
+      setNotice('The meter reading could not be updated. Please try again.')
+    })
+  }
+
+  const removeReading = (reading) => {
+    if (!window.confirm(`Delete the meter reading for ${reading.customer?.name || 'this customer'}?`)) return
+    const remove = firebaseConfigured ? deleteReading(reading.id) : Promise.resolve()
+    remove.then(() => {
+      setReadings((current) => current.filter((item) => item.id !== reading.id))
+      setNotice('Meter reading deleted.')
+    }).catch((error) => {
+      console.error(error)
+      setNotice('The meter reading could not be deleted. Please try again.')
+    })
+  }
+
+  const removeCustomer = (customer) => {
+    if (!window.confirm(`Delete ${customer.name}? Their meter readings will also be removed.`)) return
+    const customerReadings = readings.filter((reading) => reading.customerId === customer.id)
+    const remove = firebaseConfigured
+      ? Promise.all(customerReadings.map((reading) => deleteReading(reading.id))).then(() => deleteCustomer(customer.id))
+      : Promise.resolve()
+    remove.then(() => {
+      setCustomers((current) => current.filter((item) => item.id !== customer.id))
+      setReadings((current) => current.filter((reading) => reading.customerId !== customer.id))
+      setNotice('Customer and associated meter readings deleted.')
+    }).catch((error) => {
+      console.error(error)
+      setNotice('The customer could not be deleted. Please try again.')
     })
   }
 
@@ -123,21 +186,26 @@ function App() {
           <div className={dataSource === 'Firebase connected' ? 'connection-pill connected' : 'connection-pill'}><i />{dataSource}</div>
           {notice && <div className="notice"><span>✓</span>{notice}<button onClick={() => setNotice('')}>×</button></div>}
           {activePage === 'Overview' && <Overview totals={totals} readingRows={readingRows} customers={customers} onAdd={() => setShowReadingForm(true)} onNavigate={navigate} />}
-          {activePage === 'Customers' && <Customers customers={filteredCustomers} search={search} setSearch={setSearch} onAdd={() => setShowCustomerForm(true)} />}
-          {activePage === 'Meter readings' && <Readings rows={readingRows} onAdd={() => setShowReadingForm(true)} />}
+          {activePage === 'Customers' && <Customers customers={filteredCustomers} search={search} setSearch={setSearch} onAdd={() => { setEditingCustomer(null); setShowCustomerForm(true) }} onEdit={setEditingCustomer} onDelete={(customer) => removeCustomer(customer)} />}
+          {activePage === 'Meter readings' && <Readings rows={readingRows} onAdd={() => { setEditingReading(null); setShowReadingForm(true) }} onEdit={setEditingReading} onDelete={(reading) => removeReading(reading)} />}
           {activePage === 'Billing' && <Billing rows={readingRows} customers={customers} />}
           {activePage === 'Payments' && <Payments customers={customers} onRecord={(customerId = '') => { setPaymentCustomerId(customerId); setShowPaymentForm(true) }} />}
           {activePage === 'Rate plans' && <Rates onNotice={setNotice} />}
           {activePage === 'Reports' && <Reports rows={readingRows} customers={customers} />}
         </div>
       </main>
-      {showReadingForm && <ReadingModal customers={customers} onClose={() => setShowReadingForm(false)} onSubmit={addReading} />}
-      {showCustomerForm && <CustomerModal onClose={() => setShowCustomerForm(false)} onSubmit={(customer) => {
-        const save = firebaseConfigured ? createCustomer(customer) : Promise.resolve({ id: `CUST-${String(customers.length + 1).padStart(4, '0')}`, ...customer, balance: 0 })
+      {showReadingForm && <ReadingModal customers={customers} reading={editingReading} onClose={() => setShowReadingForm(false)} onSubmit={editingReading ? updateExistingReading : addReading} />}
+      {showCustomerForm && <CustomerModal customer={editingCustomer} onClose={() => setShowCustomerForm(false)} onSubmit={(customer) => {
+        const save = editingCustomer
+          ? (firebaseConfigured ? updateCustomer(editingCustomer.id, { ...customer, balance: editingCustomer.balance }) : Promise.resolve({ ...editingCustomer, ...customer }))
+          : (firebaseConfigured ? createCustomer(customer) : Promise.resolve({ id: `CUST-${String(customers.length + 1).padStart(4, '0')}`, ...customer, balance: 0 }))
         save.then((savedCustomer) => {
-          setCustomers((current) => [...current, savedCustomer])
+          setCustomers((current) => editingCustomer
+            ? current.map((item) => item.id === savedCustomer.id ? savedCustomer : item)
+            : [...current, savedCustomer])
           setShowCustomerForm(false)
-          setNotice(firebaseConfigured ? 'Customer saved to Firebase.' : 'Customer saved in demo mode.')
+          setEditingCustomer(null)
+          setNotice(firebaseConfigured ? `Customer ${editingCustomer ? 'updated' : 'saved'} in Firebase.` : `Customer ${editingCustomer ? 'updated' : 'saved'} in demo mode.`)
         }).catch((error) => {
           console.error(error)
           setNotice('The customer could not be saved. Please try again.')
@@ -187,10 +255,10 @@ function Overview({ totals, readingRows, customers, onAdd, onNavigate }) {
 function Stat({ label, value, change, tone, icon }) { return <div className="stat-card"><div className={`stat-icon ${tone}`}>{icon}</div><div className="stat-label">{label}</div><strong>{value}</strong><small className={tone === 'orange' ? 'warning' : 'positive'}>{tone !== 'orange' && '↗ '}{change}</small></div> }
 function StatusLine({ label, value, color }) { return <div className="status-line"><span><i className={color} />{label}</span><strong>{value}</strong></div> }
 
-function Customers({ customers, search, setSearch, onAdd }) { return <><PageTitle title="Customers" subtitle="Manage accounts, meters and customer information." action="＋ Add customer" onAction={onAdd} /><div className="toolbar"><div className="search-box">⌕<input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search customers, accounts or meters..." /></div><select><option>All areas</option><option>Adenta</option><option>Madina</option><option>Legon</option></select><select><option>All statuses</option><option>Outstanding</option><option>Paid</option></select></div><section className="panel table-panel"><table><thead><tr><th>Customer</th><th>Account / Meter</th><th>Area</th><th>Type</th><th>Balance</th><th>Status</th><th /></tr></thead><tbody>{customers.map((customer) => <tr key={customer.id}><td><div className="table-person"><div className="avatar soft">{customer.name.split(' ').map((word) => word[0]).join('').slice(0, 2)}</div><div><strong>{customer.name}</strong><small>{customer.phone}</small></div></div></td><td><strong>{customer.account}</strong><small>{customer.meter}</small></td><td>{customer.area}</td><td><span className="tag">{customer.type}</span></td><td><strong>{money(customer.balance)}</strong></td><td><span className={customer.balance ? 'status overdue' : 'status paid'}>{customer.balance ? 'Outstanding' : 'Paid up'}</span></td><td className="more">⋮</td></tr>)}</tbody></table></section></> }
+function Customers({ customers, search, setSearch, onAdd, onEdit, onDelete }) { return <><PageTitle title="Customers" subtitle="Manage accounts, meters and customer information." action="＋ Add customer" onAction={onAdd} /><div className="toolbar"><div className="search-box">⌕<input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search customers, accounts or meters..." /></div><select><option>All areas</option><option>Adenta</option><option>Madina</option><option>Legon</option></select><select><option>All statuses</option><option>Outstanding</option><option>Paid</option></select></div><section className="panel table-panel"><table><thead><tr><th>Customer</th><th>Account / Meter</th><th>Area</th><th>Type</th><th>Balance</th><th>Status</th><th>Actions</th></tr></thead><tbody>{customers.map((customer) => <tr key={customer.id}><td><div className="table-person"><div className="avatar soft">{customer.name.split(' ').map((word) => word[0]).join('').slice(0, 2)}</div><div><strong>{customer.name}</strong><small>{customer.phone}</small></div></div></td><td><strong>{customer.account}</strong><small>{customer.meter}</small></td><td>{customer.area}</td><td><span className="tag">{customer.type}</span></td><td><strong>{money(customer.balance)}</strong></td><td><span className={customer.balance ? 'status overdue' : 'status paid'}>{customer.balance ? 'Outstanding' : 'Paid up'}</span></td><td><div className="row-actions"><button className="text-button" onClick={() => onEdit(customer)}>Edit</button><button className="delete-button" onClick={() => onDelete(customer)}>Delete</button></div></td></tr>)}</tbody></table></section></> }
 
-function Readings({ rows, onAdd }) { return <><PageTitle title="Meter readings" subtitle="Capture and review monthly readings for every meter." action="＋ Record reading" onAction={onAdd} /><div className="reading-summary"><div><span>Read this month</span><strong>{rows.length} <small>/ {rows.length + 1} customers</small></strong></div><div><span>Total consumption</span><strong>{rows.reduce((sum, row) => sum + row.usage, 0)} <small>units</small></strong></div><div><span>Estimated billing</span><strong>{money(rows.reduce((sum, row) => sum + row.amount, 0))}</strong></div></div><section className="panel table-panel"><ReadingTable rows={rows} full /></section></> }
-function ReadingTable({ rows, full }) { return <table><thead><tr><th>Date</th><th>Customer</th><th>Previous</th><th>Present</th><th>Consumption</th><th>Rate</th><th>Amount</th>{full && <th>Status</th>}</tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{new Date(row.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</td><td><strong>{row.customer?.name}</strong><small>{row.customer?.meter}</small></td><td>{row.previous}</td><td><strong>{row.present}</strong></td><td><span className="usage">{row.usage} units</span></td><td>{money(row.rate)}</td><td><strong>{money(row.amount)}</strong></td>{full && <td><span className="status calculated">Calculated</span></td>}</tr>)}</tbody></table> }
+function Readings({ rows, onAdd, onEdit, onDelete }) { return <><PageTitle title="Meter readings" subtitle="Capture and review monthly readings for every meter." action="＋ Record reading" onAction={onAdd} /><div className="reading-summary"><div><span>Read this month</span><strong>{rows.length} <small>/ {rows.length + 1} customers</small></strong></div><div><span>Total consumption</span><strong>{rows.reduce((sum, row) => sum + row.usage, 0)} <small>units</small></strong></div><div><span>Estimated billing</span><strong>{money(rows.reduce((sum, row) => sum + row.amount, 0))}</strong></div></div><section className="panel table-panel"><ReadingTable rows={rows} full onEdit={onEdit} onDelete={onDelete} /></section></> }
+function ReadingTable({ rows, full, onEdit, onDelete }) { return <table><thead><tr><th>Date</th><th>Customer</th><th>Previous</th><th>Present</th><th>Consumption</th><th>Rate</th><th>Amount</th>{full && <th>Status</th>}{full && <th>Actions</th>}</tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{new Date(row.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</td><td><strong>{row.customer?.name}</strong><small>{row.customer?.meter}</small></td><td>{row.previous}</td><td><strong>{row.present}</strong></td><td><span className="usage">{row.usage} units</span></td><td>{money(row.rate)}</td><td><strong>{money(row.amount)}</strong></td>{full && <td><span className="status calculated">Calculated</span></td>}{full && <td><div className="row-actions"><button className="text-button" onClick={() => onEdit(row)}>Edit</button><button className="delete-button" onClick={() => onDelete(row)}>Delete</button></div></td>}</tr>)}</tbody></table> }
 
 function Billing({ rows, customers }) { return <><PageTitle title="Billing" subtitle="Review generated bills and customer balances." action="Generate bills" onAction={() => {}} /><div className="stats-grid compact"><Stat label="Bills this month" value={rows.length} change="October 2026" tone="blue" icon="▣" /><Stat label="Total billed" value={money(rows.reduce((sum, row) => sum + row.amount, 0))} change="From readings" tone="green" icon="₵" /><Stat label="Overdue accounts" value={customers.filter((customer) => customer.balance > 0).length} change="Needs follow-up" tone="orange" icon="!" /></div><section className="panel table-panel"><div className="panel-heading"><div><h2>October 2026 bills</h2><p>Automatically calculated from meter readings</p></div><button className="secondary-button">Export CSV</button></div><ReadingTable rows={rows} full /></section></> }
 function Payments({ customers, onRecord }) {
@@ -204,8 +272,8 @@ function Payments({ customers, onRecord }) {
 function Rates({ onNotice }) { return <><PageTitle title="Rate plans" subtitle="Configure how water usage is priced for each customer group." action="＋ Add rate plan" onAction={() => onNotice('Rate plan creation will be added next.')} /><div className="rate-grid"><div className="rate-card featured"><div className="rate-top"><span className="tag">Default</span><span className="more">⋮</span></div><h2>Residential</h2><p>Standard household water rate</p><strong>GHS 6.00 <small>/ unit</small></strong><div className="rate-detail"><span>Service charge</span><b>GHS 0.00</b></div><div className="rate-detail"><span>Status</span><b className="active-text">Active</b></div></div><div className="rate-card"><div className="rate-top"><span className="tag purple-tag">Commercial</span><span className="more">⋮</span></div><h2>Commercial</h2><p>Businesses and larger users</p><strong>GHS 10.00 <small>/ unit</small></strong><div className="rate-detail"><span>Service charge</span><b>GHS 25.00</b></div><div className="rate-detail"><span>Status</span><b className="active-text">Active</b></div></div><div className="rate-card add-rate" onClick={() => onNotice('Create a rate plan from the button above.')}><span>＋</span><strong>Add another plan</strong><small>For compounds, schools or other groups</small></div></div></> }
 function Reports({ rows, customers }) { return <><PageTitle title="Reports" subtitle="Understand usage, revenue and collection performance." action="Export report" onAction={() => {}} /><div className="report-grid"><div className="report-card"><span className="stat-icon green">₵</span><small>Total billed</small><strong>{money(rows.reduce((sum, row) => sum + row.amount, 0))}</strong><p>Based on current readings</p></div><div className="report-card"><span className="stat-icon blue">⌁</span><small>Total usage</small><strong>{rows.reduce((sum, row) => sum + row.usage, 0)} units</strong><p>Across all recorded meters</p></div><div className="report-card"><span className="stat-icon orange">!</span><small>Outstanding</small><strong>{customers.filter((customer) => customer.balance > 0).length} accounts</strong><p>Require collection follow-up</p></div></div><section className="panel report-table"><h2>Area performance</h2><p className="muted">Usage and account status by service area.</p>{['Adenta', 'Madina', 'Legon'].map((area) => { const areaCustomers = customers.filter((customer) => customer.area === area); return <div className="area-row" key={area}><strong>{area}</strong><span>{areaCustomers.length} customers</span><div className="area-bar"><i style={{ width: `${Math.max(areaCustomers.length * 18, 18)}%` }} /></div><b>{money(areaCustomers.reduce((sum, customer) => sum + customer.balance, 0))}</b></div> })}</section></> }
 function PageTitle({ title, subtitle, action, onAction }) { return <div className="page-heading compact-heading"><div><h1>{title}</h1><p className="muted">{subtitle}</p></div>{action && <button className="primary-button" onClick={onAction}>{action}</button>}</div> }
-function ReadingModal({ customers, onClose, onSubmit }) { return <div className="modal-backdrop"><div className="modal"><div className="modal-heading"><div><p className="eyebrow">NEW ENTRY</p><h2>Record meter reading</h2><p className="muted">The bill will be calculated automatically.</p></div><button className="close-button" onClick={onClose}>×</button></div><form onSubmit={onSubmit}><label>Customer<select name="customerId" required>{customers.map((customer) => <option value={customer.id} key={customer.id}>{customer.name} · {customer.meter}</option>)}</select></label><div className="form-grid"><label>Reading date<input name="date" type="date" defaultValue="2026-10-12" required /></label><label>Rate per unit<input name="rate" type="number" min="0" step="0.01" defaultValue="6" required /></label><label>Previous reading<input name="previous" type="number" min="0" defaultValue="0" required /></label><label>Present reading<input name="present" type="number" min="0" defaultValue="0" required /></label></div><div className="form-hint">Consumption and amount due will be calculated from the values above.</div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" type="submit">Save reading</button></div></form></div></div> }
-function CustomerModal({ onClose, onSubmit }) { return <div className="modal-backdrop"><div className="modal"><div className="modal-heading"><div><p className="eyebrow">NEW ACCOUNT</p><h2>Add customer</h2><p className="muted">Create a customer account and assign a meter.</p></div><button className="close-button" onClick={onClose}>×</button></div><form onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); onSubmit({ name: data.get('name'), account: data.get('account'), meter: data.get('meter'), area: data.get('area'), type: data.get('type'), phone: data.get('phone') }) }}><div className="form-grid"><label>Customer name<input name="name" required placeholder="Full name or business" /></label><label>Phone number<input name="phone" required placeholder="0244 000 000" /></label><label>Account number<input name="account" required placeholder="ACC-10030" /></label><label>Meter number<input name="meter" required placeholder="MTR-4530" /></label><label>Area<input name="area" required placeholder="Adenta" /></label><label>Customer type<select name="type" defaultValue="Residential"><option>Residential</option><option>Commercial</option><option>Compound</option><option>Institutional</option></select></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" type="submit">Save customer</button></div></form></div></div> }
+function ReadingModal({ customers, reading, onClose, onSubmit }) { return <div className="modal-backdrop"><div className="modal"><div className="modal-heading"><div><p className="eyebrow">{reading ? 'EDIT ENTRY' : 'NEW ENTRY'}</p><h2>{reading ? 'Edit meter reading' : 'Record meter reading'}</h2><p className="muted">The bill will be calculated automatically.</p></div><button className="close-button" onClick={onClose}>×</button></div><form onSubmit={onSubmit}><label>Customer<select name="customerId" required defaultValue={reading?.customerId}>{customers.map((customer) => <option value={customer.id} key={customer.id}>{customer.name} · {customer.meter}</option>)}</select></label><div className="form-grid"><label>Reading date<input name="date" type="date" defaultValue={reading?.date || '2026-10-12'} required /></label><label>Rate per unit<input name="rate" type="number" min="0" step="0.01" defaultValue={reading?.rate || 6} required /></label><label>Previous reading<input name="previous" type="number" min="0" defaultValue={reading?.previous || 0} required /></label><label>Present reading<input name="present" type="number" min="0" defaultValue={reading?.present || 0} required /></label></div><div className="form-hint">Consumption and amount due will be calculated from the values above.</div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" type="submit">{reading ? 'Update reading' : 'Save reading'}</button></div></form></div></div> }
+function CustomerModal({ customer, onClose, onSubmit }) { return <div className="modal-backdrop"><div className="modal"><div className="modal-heading"><div><p className="eyebrow">{customer ? 'EDIT ACCOUNT' : 'NEW ACCOUNT'}</p><h2>{customer ? 'Edit customer' : 'Add customer'}</h2><p className="muted">Manage customer account and meter information.</p></div><button className="close-button" onClick={onClose}>×</button></div><form onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); onSubmit({ name: data.get('name'), account: data.get('account'), meter: data.get('meter'), area: data.get('area'), type: data.get('type'), phone: data.get('phone') }) }}><div className="form-grid"><label>Customer name<input name="name" required defaultValue={customer?.name} placeholder="Full name or business" /></label><label>Phone number<input name="phone" required defaultValue={customer?.phone} placeholder="0244 000 000" /></label><label>Account number<input name="account" required defaultValue={customer?.account} placeholder="ACC-10030" /></label><label>Meter number<input name="meter" required defaultValue={customer?.meter} placeholder="MTR-4530" /></label><label>Area<input name="area" required defaultValue={customer?.area} placeholder="Adenta" /></label><label>Customer type<select name="type" defaultValue={customer?.type || 'Residential'}><option>Residential</option><option>Commercial</option><option>Compound</option><option>Institutional</option></select></label></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" type="submit">{customer ? 'Update customer' : 'Save customer'}</button></div></form></div></div> }
 function PaymentModal({ customers, initialCustomerId, onClose, onSubmit }) {
   const outstanding = customers.filter((customer) => Number(customer.balance) > 0)
   const defaultCustomer = outstanding.find((customer) => customer.id === initialCustomerId) || outstanding[0]

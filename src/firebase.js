@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app'
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth'
-import { addDoc, collection, doc, getDocs, getFirestore, serverTimestamp, writeBatch } from 'firebase/firestore'
+import { addDoc, collection, deleteDoc, doc, getDocs, getFirestore, increment, serverTimestamp, updateDoc, writeBatch } from 'firebase/firestore'
 
 const config = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -46,6 +46,25 @@ export async function createReading(reading) {
   return { id: document.id, ...reading }
 }
 
+export async function addCustomerBalance(id, amount) {
+  if (!db) throw new Error('Firebase is not configured. Add the VITE_FIREBASE_* values to .env.local.')
+  await updateDoc(doc(db, 'customers', id), {
+    balance: increment(amount),
+    updatedAt: serverTimestamp(),
+  })
+}
+
+export async function updateReading(id, reading) {
+  if (!db) throw new Error('Firebase is not configured. Add the VITE_FIREBASE_* values to .env.local.')
+  await updateDoc(doc(db, 'readings', id), { ...reading, updatedAt: serverTimestamp() })
+  return { id, ...reading }
+}
+
+export async function deleteReading(id) {
+  if (!db) throw new Error('Firebase is not configured. Add the VITE_FIREBASE_* values to .env.local.')
+  await deleteDoc(doc(db, 'readings', id))
+}
+
 export async function createCustomer(customer) {
   if (!db) throw new Error('Firebase is not configured. Add the VITE_FIREBASE_* values to .env.local.')
   const document = await addDoc(collection(db, 'customers'), {
@@ -54,6 +73,17 @@ export async function createCustomer(customer) {
     createdAt: serverTimestamp(),
   })
   return { id: document.id, ...customer, balance: 0 }
+}
+
+export async function updateCustomer(id, customer) {
+  if (!db) throw new Error('Firebase is not configured. Add the VITE_FIREBASE_* values to .env.local.')
+  await updateDoc(doc(db, 'customers', id), { ...customer, updatedAt: serverTimestamp() })
+  return { id, ...customer }
+}
+
+export async function deleteCustomer(id) {
+  if (!db) throw new Error('Firebase is not configured. Add the VITE_FIREBASE_* values to .env.local.')
+  await deleteDoc(doc(db, 'customers', id))
 }
 
 export async function recordPayment(payment) {
