@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app'
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from 'firebase/auth'
-import { addDoc, collection, getDocs, getFirestore, serverTimestamp } from 'firebase/firestore'
+import { addDoc, collection, doc, getDocs, getFirestore, serverTimestamp, writeBatch } from 'firebase/firestore'
 
 const config = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -54,4 +54,20 @@ export async function createCustomer(customer) {
     createdAt: serverTimestamp(),
   })
   return { id: document.id, ...customer, balance: 0 }
+}
+
+export async function recordPayment(payment) {
+  if (!db) throw new Error('Firebase is not configured. Add the VITE_FIREBASE_* values to .env.local.')
+  const paymentDocument = doc(collection(db, 'payments'))
+  const batch = writeBatch(db)
+  batch.set(paymentDocument, {
+    ...payment,
+    createdAt: serverTimestamp(),
+  })
+  batch.update(doc(db, 'customers', payment.customerId), {
+    balance: 0,
+    updatedAt: serverTimestamp(),
+  })
+  await batch.commit()
+  return { id: paymentDocument.id, ...payment }
 }
